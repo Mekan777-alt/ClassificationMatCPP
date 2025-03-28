@@ -1,0 +1,19 @@
+C:\Users\mekan\AppData\Local\Programs\CLion\bin\cmake\win\x64\bin\cmake.exe -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH=C:/msys64/mingw64 -DVOSK_LIBRARY=C:/msys64/mingw64/bin/libvosk.dll -DVOSK_INCLUDE_DIR=C:/msys64/mingw64/include -G "MinGW Makefiles" -S C:\Users\mekan\CLionProjects\ClassificationMatCPP -B C:\Users\mekan\CLionProjects\ClassificationMatCPP\cmake-build-debug
+-- The CXX compiler identification is GNU 14.2.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/msys64/mingw64/bin/c++.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Performing Test HAVE_STDATOMIC
+-- Performing Test HAVE_STDATOMIC - Success
+-- Found WrapAtomic: TRUE
+-- Found WrapVulkanHeaders: C:/msys64/mingw64/include
+-- Found CURL: C:/msys64/mingw64/lib/cmake/CURL/CURLConfig.cmake (found version "8.12.1")
+-- Found nlohmann_json: C:/msys64/mingw64/share/cmake/nlohmann_json/nlohmann_jsonConfig.cmake (found version "3.11.3")
+-- Configuring done (1.2s)
+-- Generating done (0.3s)
+-- Build files have been written to: C:/Users/mekan/CLionProjects/ClassificationMatCPP/cmake-build-debug

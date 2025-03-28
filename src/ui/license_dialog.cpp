@@ -13,6 +13,7 @@
 #include <ctime>
 #include <iomanip>
 #include <chrono>
+#include <QMainWindow>
 #include <sstream>
 
 namespace audiocensor {

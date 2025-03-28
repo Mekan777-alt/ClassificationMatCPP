@@ -18,7 +18,12 @@ set(RESOURCES_DIR tools/resources)
 
 # Поиск необходимых пакетов
 find_package(Qt6 COMPONENTS Core Widgets REQUIRED)
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL QUIET)
+if(NOT OpenSSL_FOUND)
+    message(WARNING "OpenSSL not found, building without SSL support")
+    # Определяем флаг для компиляции без OpenSSL
+    add_definitions(-DNO_SSL_SUPPORT)
+endif()
 find_package(CURL REQUIRED)
 find_package(PortAudio REQUIRED)
 

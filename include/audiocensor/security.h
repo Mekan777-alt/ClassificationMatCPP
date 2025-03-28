@@ -96,4 +96,18 @@ bool validate_environment();
 } // namespace security
 } // namespace audiocensor
 
+/**
+ * @brief Вычисляет MD5 хеш строки
+ * @param str Исходная строка
+ * @return MD5 хеш в виде строки в шестнадцатеричном формате
+ */
+std::string md5_hash(const std::string& str);
+
+/**
+ * @brief Вычисляет SHA-256 хеш строки
+ * @param str Исходная строка
+ * @return SHA-256 хеш в виде строки в шестнадцатеричном формате
+ */
+std::string sha256_hash(const std::string& str);
+
 #endif // AUDIOCENSOR_SECURITY_H

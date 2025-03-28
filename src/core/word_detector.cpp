@@ -7,6 +7,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <thread> // Добавлено для std::this_thread
 
 namespace audiocensor {
 
@@ -161,9 +162,9 @@ std::string WordDetector::_normalize_word(const std::string& word) {
             result += c;
             prev_char = c;
         } else {
-            // Проверяем, является ли символ гласной
-            bool is_vowel = (c == 'а' || c == 'е' || c == 'и' || c == 'о' || c == 'у' ||
-                             c == 'ы' || c == 'э' || c == 'ю' || c == 'я');
+            // Проверяем, является ли символ гласной - заменим многосимвольные константы на одиночные символы
+            bool is_vowel = (c == '\xD0\xB0' || c == '\xD0\xB5' || c == '\xD0\xB8' || c == '\xD0\xBE' || c == '\xD1\x83' ||
+                             c == '\xD1\x8B' || c == '\xD1\x8D' || c == '\xD1\x8E' || c == '\xD1\x8F');
 
             // Позволяем повторение гласных
             if (is_vowel) {
@@ -356,3 +357,6 @@ std::tuple<bool, std::string> WordDetector::is_prohibited_word(
     auto result = std::make_tuple(false, "");
     cache[cache_key] = result;
     return result;
+}
+
+} // namespace audiocensor

@@ -106,6 +106,7 @@ bool is_running_as_executable() {
 #endif
 }
 
+// Добавляем эту функцию
 std::string md5_hash(const std::string& str) {
     unsigned char digest[MD5_DIGEST_LENGTH];
     MD5(reinterpret_cast<const unsigned char*>(str.c_str()), str.length(), digest);

@@ -141,3 +141,6 @@ void ConfigManager::reset_config() {
     _target_patterns = DEFAULT_TARGET_PATTERNS;
     _save_config();
 }
+
+} // namespace audiocensor
+

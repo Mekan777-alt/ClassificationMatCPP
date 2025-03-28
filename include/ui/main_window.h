@@ -52,7 +52,7 @@ protected:
      * @brief Обработка закрытия приложения
      * @param event Событие закрытия
      */
-    void closeEvent(QEvent* event) override;
+    void closeEvent(QEvent* event);
     
 private slots:
     /**

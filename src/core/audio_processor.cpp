@@ -1,471 +1,4 @@
-} catch (const std::exception& e) {
-        emit logMessage(QString("❌ Непредвиденная ошибка настройки аудио потоков: %1").arg(e.what()));
-        return false;
-    }
-}
-
-std::vector<short> AudioProcessor::generate_beep(double duration) {
-    // Проверяем, есть ли бип такой длительности в кэше
-    if (beep_cache.find(duration) != beep_cache.end()) {
-        return beep_cache[duration];
-    }
-    
-    // Если нет, генерируем новый
-    int samples = static_cast<int>(current_sample_rate * duration);
-    std::vector<short> beep_data(samples);
-    
-    double beep_frequency = std::stod(config.at("beep_frequency"));
-    double beep_volume = 0.5; // Громкость бипа (0.0 - 1.0)
-    
-    for (int i = 0; i < samples; i++) {
-        double t = static_cast<double>(i) / current_sample_rate;
-        beep_data[i] = static_cast<short>(
-            sin(2 * M_PI * beep_frequency * t) * 32767 * beep_volume
-        );
-    }
-    
-    // Добавляем в кэш и возвращаем
-    beep_cache[duration] = beep_data;
-    return beep_data;
-}
-
-void AudioProcessor::run() {
-    running = true;
-    program_start_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count() / 1000.0;
-    
-    chunks_processed = 0;
-    
-    // Очистка буферов
-    {
-        QMutexLocker locker(&buffer_lock);
-        audio_buffer.clear();
-        audio_buffer.resize(buffer_size_in_chunks * std::stoi(config.at("chunk_size")));
-    }
-    
-    {
-        QMutexLocker locker(&regions_lock);
-        censored_regions.clear();
-    }
-    
-    emit logMessage("🎤 Запись и обработка аудио начаты");
-    double buffer_delay_sec = std::stod(config.at("buffer_delay"));
-    emit logMessage(QString("📊 Буферизация: воспроизведение начнется через %1 секунд...").
-                  arg(buffer_delay_sec, 0, 'f', 1));
-    
-    // Запускаем стримы
-    Pa_StartStream(input_stream);
-    Pa_StartStream(output_stream);
-    
-    // Подготавливаем буфер для чтения данных
-    int chunk_size = std::stoi(config.at("chunk_size"));
-    std::vector<short> input_chunk(chunk_size);
-    std::vector<short> output_chunk(chunk_size);
-    
-    // Переменные для распознавания
-    std::string audio_data_for_recognition;
-    bool recognition_active = true;
-    
-    // Ждем, пока буфер наполнится
-    auto recording_start = std::chrono::system_clock::now();
-    double buffer_delay = std::stod(config.at("buffer_delay"));
-    
-    while (std::chrono::duration<double>(std::chrono::system_clock::now() - recording_start).count() < buffer_delay && running) {
-        if (!paused) {
-            try {
-                // Чтение данных с микрофона
-                Pa_ReadStream(input_stream, input_chunk.data(), chunk_size);
-                
-                // Добавляем в буфер
-                {
-                    QMutexLocker locker(&buffer_lock);
-                    for (short sample : input_chunk) {
-                        audio_buffer.push_back(sample);
-                        if (audio_buffer.size() > buffer_size_in_chunks * chunk_size) {
-                            audio_buffer.pop_front();
-                        }
-                    }
-                }
-                
-                // Обновляем информацию о буфере в UI
-                emit bufferUpdate(static_cast<int>(audio_buffer.size()), 
-                                buffer_size_in_chunks * chunk_size);
-                
-                // Накапливаем данные для распознавания
-                if (recognition_active && config.at("enable_censoring") == "true") {
-                    // Копируем в строку для распознавания
-                    const char* input_data = reinterpret_cast<const char*>(input_chunk.data());
-                    audio_data_for_recognition.append(input_data, chunk_size * sizeof(short));
-                    
-                    // Отправляем на распознавание речи
-                    if (vosk_recognizer_accept_waveform(recognizer.get(), 
-                                                      input_data, 
-                                                      chunk_size * sizeof(short))) {
-                        const char* result_json = vosk_recognizer_result(recognizer.get());
-                        process_recognition_result(result_json);
-                    }
-                }
-                
-            } catch (const std::exception& e) {
-                emit logMessage(QString("❌ Ошибка при записи аудио: %1").arg(e.what()));
-            }
-        }
-        
-        // Небольшая пауза для экономии CPU
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    
-    emit logMessage("🔊 Воспроизведение аудио начато");
-    
-    // Основной цикл обработки
-    while (running) {
-        if (!paused) {
-            try {
-                // Запись с микрофона
-                Pa_ReadStream(input_stream, input_chunk.data(), chunk_size);
-                
-                // Добавляем в буфер
-                {
-                    QMutexLocker locker(&buffer_lock);
-                    for (short sample : input_chunk) {
-                        audio_buffer.push_back(sample);
-                        if (audio_buffer.size() > buffer_size_in_chunks * chunk_size) {
-                            audio_buffer.pop_front();
-                        }
-                    }
-                }
-                
-                // Накапливаем данные для распознавания
-                if (recognition_active && config.at("enable_censoring") == "true") {
-                    // Копируем в строку для распознавания
-                    const char* input_data = reinterpret_cast<const char*>(input_chunk.data());
-                    audio_data_for_recognition.append(input_data, chunk_size * sizeof(short));
-                    
-                    // Ограничиваем размер данных для распознавания
-                    size_t max_recognition_bytes = current_sample_rate * sizeof(short) * 2; // ~2 секунды аудио
-                    if (audio_data_for_recognition.size() > max_recognition_bytes) {
-                        audio_data_for_recognition = audio_data_for_recognition.substr(
-                            audio_data_for_recognition.size() - max_recognition_bytes
-                        );
-                    }
-                    
-                    // Отправляем на распознавание речи
-                    if (vosk_recognizer_accept_waveform(recognizer.get(), 
-                                                      input_data, 
-                                                      chunk_size * sizeof(short))) {
-                        const char* result_json = vosk_recognizer_result(recognizer.get());
-                        process_recognition_result(result_json);
-                    }
-                }
-                
-                // Воспроизведение с задержкой
-                std::fill(output_chunk.begin(), output_chunk.end(), 0); // Заполняем нулями
-                
-                // Извлекаем чанк из буфера
-                size_t samples_available;
-                {
-                    QMutexLocker locker(&buffer_lock);
-                    samples_available = audio_buffer.size();
-                    
-                    if (samples_available >= chunk_size) {
-                        for (int i = 0; i < chunk_size; i++) {
-                            if (!audio_buffer.empty()) {
-                                output_chunk[i] = audio_buffer.front();
-                                audio_buffer.pop_front();
-                            }
-                        }
-                    } else {
-                        // Если недостаточно данных, продолжаем цикл
-                        continue;
-                    }
-                }
-                
-                // Проверяем, нужно ли цензурировать этот чанк
-                if (config.at("enable_censoring") == "true") {
-                    QMutexLocker locker(&regions_lock);
-                    for (size_t i = 0; i < censored_regions.size(); i++) {
-                        auto& region = censored_regions[i];
-                        int start_idx = std::get<0>(region);
-                        int end_idx = std::get<1>(region);
-                        bool processed = std::get<2>(region);
-                        
-                        if (start_idx <= chunks_processed && chunks_processed <= end_idx) {
-                            // Применяем цензуру - заменяем чанк на тишину или бип
-                            std::fill(output_chunk.begin(), output_chunk.end(), 0);
-                            emit censorApplied(chunks_processed, start_idx, end_idx);
-                            
-                            // Если достигли конца интервала, отмечаем его как обработанный
-                            if (chunks_processed == end_idx) {
-                                std::get<2>(region) = true;
-                            }
-                        }
-                    }
-                    
-                    // Удаляем обработанные интервалы
-                    censored_regions.erase(
-                        std::remove_if(censored_regions.begin(), censored_regions.end(), 
-                                      [](const auto& r) { return std::get<2>(r); }),
-                        censored_regions.end()
-                    );
-                }
-                
-                // Отправляем на выход
-                Pa_WriteStream(output_stream, output_chunk.data(), chunk_size);
-                
-                // Увеличиваем счетчик обработанных чанков
-                chunks_processed++;
-                
-                // Обновляем информацию о буфере в UI
-                emit bufferUpdate(static_cast<int>(audio_buffer.size()), 
-                                buffer_size_in_chunks * chunk_size);
-                
-            } catch (const std::exception& e) {
-                emit logMessage(QString("❌ Ошибка при обработке аудио: %1").arg(e.what()));
-            }
-        }
-        
-        // Небольшая пауза для экономии CPU
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    
-    // Очистка ресурсов
-    cleanup_resources();
-    emit logMessage("✅ Обработка аудио завершена");
-}
-
-void AudioProcessor::process_recognition_result(const std::string& result_json) {
-    try {
-        // Парсим JSON
-        json result = json::parse(result_json);
-        
-        // Проверяем наличие результатов
-        if (!result.contains("result") || !result["result"].is_array()) {
-            return;
-        }
-        
-        auto words = result["result"];
-        if (words.empty()) {
-            return;
-        }
-        
-        // Выводим все распознанные слова для отладки, если включено
-        if (config.at("debug_mode") == "true") {
-            QStringList all_words;
-            for (const auto& word : words) {
-                all_words.append(QString::fromStdString(word["word"].get<std::string>()).toLower());
-            }
-            emit logMessage(QString("🔍 Распознано: %1").arg(all_words.join(", ")));
-        }
-        
-        // Текущее время от начала программы
-        double elapsed_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        ).count() / 1000.0 - program_start_time;
-        
-        // Создаем детектор слов
-        WordDetector detector(std::unordered_map<std::string, std::string>());
-        
-        // Подготавливаем списки целевых слов и паттернов
-        std::vector<std::string> target_patterns;
-        std::vector<std::string> target_words;
-        
-        // Разбор строки с паттернами
-        if (config.find("target_patterns") != config.end()) {
-            try {
-                // Предполагаем, что это JSON-строка с массивом
-                target_patterns = json::parse(config.at("target_patterns")).get<std::vector<std::string>>();
-            } catch (...) {
-                // Если не удалось разобрать как JSON, пробуем как обычную строку с разделителями
-                std::istringstream iss(config.at("target_patterns"));
-                std::string pattern;
-                while (std::getline(iss, pattern, ',')) {
-                    if (!pattern.empty()) {
-                        target_patterns.push_back(pattern);
-                    }
-                }
-            }
-        }
-        
-        // Разбор строки с целевыми словами
-        if (config.find("target_words") != config.end()) {
-            try {
-                // Предполагаем, что это JSON-строка с массивом
-                target_words = json::parse(config.at("target_words")).get<std::vector<std::string>>();
-            } catch (...) {
-                // Если не удалось разобрать как JSON, пробуем как обычную строку с разделителями
-                std::istringstream iss(config.at("target_words"));
-                std::string word;
-                while (std::getline(iss, word, ',')) {
-                    if (!word.empty()) {
-                        target_words.push_back(word);
-                    }
-                }
-            }
-        }
-        
-        // Параметры для вычисления индексов чанков
-        int chunk_size = std::stoi(config.at("chunk_size"));
-        double buffer_delay = std::stod(config.at("buffer_delay"));
-        int safety_margin = std::stoi(config.at("safety_margin"));
-        double chunks_per_second = static_cast<double>(current_sample_rate) / chunk_size;
-        
-        for (const auto& word : words) {
-            std::string word_text = word["word"].get<std::string>();
-            std::transform(word_text.begin(), word_text.end(), word_text.begin(),
-                         [](unsigned char c){ return std::tolower(c); });
-            
-            // Проверяем, является ли слово запрещенным
-            bool is_prohibited;
-            std::string matched_pattern;
-            std::tie(is_prohibited, matched_pattern) = detector.is_prohibited_word(word_text, 
-                                                                               target_patterns, 
-                                                                               target_words);
-            
-            if (is_prohibited) {
-                // Получаем время начала и конца слова
-                double start_time = word["start"].get<double>();
-                double end_time = word["end"].get<double>();
-                
-                // Рассчитываем индексы чанков для цензуры с учетом текущей частоты дискретизации
-                int chunks_offset_start = static_cast<int>((start_time - (elapsed_time - buffer_delay)) *
-                                                      chunks_per_second) - safety_margin;
-                int chunks_offset_end = static_cast<int>((end_time - (elapsed_time - buffer_delay)) *
-                                                    chunks_per_second) + safety_margin;
-                
-                // Абсолютные индексы чанков для цензуры
-                int censored_chunk_start = chunks_processed + chunks_offset_start;
-                int censored_chunk_end = chunks_processed + chunks_offset_end;
-                
-                // Добавляем регион для цензуры
-                {
-                    QMutexLocker locker(&regions_lock);
-                    censored_regions.push_back(std::make_tuple(censored_chunk_start, censored_chunk_end, false));
-                }
-                
-                // Уведомляем о найденном слове
-                emit wordDetected(QString::fromStdString(word_text), start_time, end_time);
-                
-                // Улучшенное форматирование сообщения
-                QString log_message = QString("⚠️ Обнаружено ненормативная лексика: \"%1\"\n")
-                                    .arg(QString::fromStdString(word_text));
-                
-                log_message += QString("   Время: %1с - %2с (длительность: %3с)\n")
-                            .arg(start_time, 0, 'f', 2)
-                            .arg(end_time, 0, 'f', 2)
-                            .arg(end_time - start_time, 0, 'f', 2);
-                
-                emit logMessage(log_message);
-                
-                // Сохраняем в файл, если включено
-                if (config.at("log_to_file") == "true") {
-                    try {
-                        std::ofstream log_file(config.at("log_file"), std::ios::app);
-                        if (log_file.is_open()) {
-                            auto now = std::chrono::system_clock::now();
-                            auto now_time_t = std::chrono::system_clock::to_time_t(now);
-                            std::tm now_tm = *std::localtime(&now_time_t);
-                            
-                            char timestamp[20];
-                            std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &now_tm);
-                            
-                            log_file << timestamp << " - Обнаружено: \"" << word_text << "\" "
-                                    << (matched_pattern.empty() ? "" : "(шаблон: " + matched_pattern + ") ")
-                                    << "(время: " << start_time << "с-" << end_time << "с)" << std::endl;
-                            
-                            log_file.close();
-                        }
-                    } catch (const std::exception& e) {
-                        emit logMessage(QString("❌ Ошибка записи в лог-файл: %1").arg(e.what()));
-                    }
-                }
-            }
-        }
-        
-    } catch (const json::parse_error& e) {
-        emit logMessage(QString("❌ Ошибка при разборе JSON результатов распознавания: %1").arg(e.what()));
-    } catch (const std::exception& e) {
-        emit logMessage(QString("❌ Ошибка при обработке результатов распознавания: %1").arg(e.what()));
-    }
-}
-
-void AudioProcessor::update_config(const std::unordered_map<std::string, std::string>& new_config) {
-    config = new_config;
-    
-    // Пересчитываем размер буфера
-    buffer_size_in_chunks = static_cast<int>(std::stod(config.at("buffer_delay")) * current_sample_rate / 
-                                          std::stoi(config.at("chunk_size"))) + 2;
-    
-    // Очищаем кэш бипов при изменении частоты или громкости
-    beep_cache.clear();
-}
-
-void AudioProcessor::pause() {
-    paused = true;
-}
-
-void AudioProcessor::resume() {
-    paused = false;
-}
-
-void AudioProcessor::stop_processing() {
-    running = false;
-    
-    // Ждем завершения потока
-    wait(1000); // Ждем максимум 1 секунду
-    
-    // Освобождаем ресурсы
-    cleanup_resources();
-}
-
-void AudioProcessor::cleanup_resources() {
-    // Правильное освобождение ресурсов
-    try {
-        if (input_stream) {
-            Pa_StopStream(input_stream);
-            Pa_CloseStream(input_stream);
-            input_stream = nullptr;
-        }
-    } catch (const std::exception& e) {
-        emit logMessage(QString("Ошибка при закрытии потока ввода: %1").arg(e.what()));
-    }
-    
-    try {
-        if (output_stream) {
-            Pa_StopStream(output_stream);
-            Pa_CloseStream(output_stream);
-            output_stream = nullptr;
-        }
-    } catch (const std::exception& e) {
-        emit logMessage(QString("Ошибка при закрытии потока вывода: %1").arg(e.what()));
-    }
-    
-    try {
-        Pa_Terminate();
-    } catch (const std::exception& e) {
-        emit logMessage(QString("Ошибка при завершении PortAudio: %1").arg(e.what()));
-    }
-    
-    // Очищаем буферы
-    {
-        QMutexLocker locker(&buffer_lock);
-        audio_buffer.clear();
-    }
-    
-    {
-        QMutexLocker locker(&regions_lock);
-        censored_regions.clear();
-    }
-    
-    // Очищаем кэш бипов
-    beep_cache.clear();
-    
-    // Освобождаем распознаватель и модель
-    recognizer.reset();
-    model.reset();
-    
-    emit logMessage("✅ Ресурсы аудио освобождены");
-}#include "audiocensor/audio_processor.h"
+#include "audiocensor/audio_processor.h"
 #include "audiocensor/word_detector.h"
 #include "audiocensor/constants.h"
 
@@ -780,3 +313,468 @@ bool AudioProcessor::setup_streams(int input_index, int output_index) {
         return false;
     }
 }
+
+std::vector<short> AudioProcessor::generate_beep(double duration) {
+    // Проверяем, есть ли бип такой длительности в кэше
+    if (beep_cache.find(duration) != beep_cache.end()) {
+        return beep_cache[duration];
+    }
+
+    // Если нет, генерируем новый
+    int samples = static_cast<int>(current_sample_rate * duration);
+    std::vector<short> beep_data(samples);
+
+    double beep_frequency = std::stod(config.at("beep_frequency"));
+    double beep_volume = 0.5; // Громкость бипа (0.0 - 1.0)
+
+    for (int i = 0; i < samples; i++) {
+        double t = static_cast<double>(i) / current_sample_rate;
+        beep_data[i] = static_cast<short>(
+            sin(2 * M_PI * beep_frequency * t) * 32767 * beep_volume
+        );
+    }
+
+    // Добавляем в кэш и возвращаем
+    beep_cache[duration] = beep_data;
+    return beep_data;
+}
+
+void AudioProcessor::run() {
+    running = true;
+    program_start_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count() / 1000.0;
+
+    chunks_processed = 0;
+
+    // Очистка буферов
+    {
+        QMutexLocker locker(&buffer_lock);
+        audio_buffer.clear();
+        audio_buffer.resize(buffer_size_in_chunks * std::stoi(config.at("chunk_size")));
+    }
+
+    {
+        QMutexLocker locker(&regions_lock);
+        censored_regions.clear();
+    }
+
+    emit logMessage("🎤 Запись и обработка аудио начаты");
+    double buffer_delay_sec = std::stod(config.at("buffer_delay"));
+    emit logMessage(QString("📊 Буферизация: воспроизведение начнется через %1 секунд...").
+                  arg(buffer_delay_sec, 0, 'f', 1));
+
+    // Запускаем стримы
+    Pa_StartStream(input_stream);
+    Pa_StartStream(output_stream);
+
+    // Подготавливаем буфер для чтения данных
+    int chunk_size = std::stoi(config.at("chunk_size"));
+    std::vector<short> input_chunk(chunk_size);
+    std::vector<short> output_chunk(chunk_size);
+
+    // Переменные для распознавания
+    std::string audio_data_for_recognition;
+    bool recognition_active = true;
+
+    // Ждем, пока буфер наполнится
+    auto recording_start = std::chrono::system_clock::now();
+    double buffer_delay = std::stod(config.at("buffer_delay"));
+
+    while (std::chrono::duration<double>(std::chrono::system_clock::now() - recording_start).count() < buffer_delay && running) {
+        if (!paused) {
+            try {
+                // Чтение данных с микрофона
+                Pa_ReadStream(input_stream, input_chunk.data(), chunk_size);
+
+                // Добавляем в буфер
+                {
+                    QMutexLocker locker(&buffer_lock);
+                    for (short sample : input_chunk) {
+                        audio_buffer.push_back(sample);
+                        if (audio_buffer.size() > buffer_size_in_chunks * chunk_size) {
+                            audio_buffer.pop_front();
+                        }
+                    }
+                }
+
+                // Обновляем информацию о буфере в UI
+                emit bufferUpdate(static_cast<int>(audio_buffer.size()),
+                                buffer_size_in_chunks * chunk_size);
+
+                // Накапливаем данные для распознавания
+                if (recognition_active && config.at("enable_censoring") == "true") {
+                    // Копируем в строку для распознавания
+                    const char* input_data = reinterpret_cast<const char*>(input_chunk.data());
+                    audio_data_for_recognition.append(input_data, chunk_size * sizeof(short));
+
+                    // Отправляем на распознавание речи
+                    if (vosk_recognizer_accept_waveform(recognizer.get(),
+                                                      input_data,
+                                                      chunk_size * sizeof(short))) {
+                        const char* result_json = vosk_recognizer_result(recognizer.get());
+                        process_recognition_result(result_json);
+                    }
+                }
+
+            } catch (const std::exception& e) {
+                emit logMessage(QString("❌ Ошибка при записи аудио: %1").arg(e.what()));
+            }
+        }
+
+        // Небольшая пауза для экономии CPU
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    emit logMessage("🔊 Воспроизведение аудио начато");
+
+    // Основной цикл обработки
+    while (running) {
+        if (!paused) {
+            try {
+                // Запись с микрофона
+                Pa_ReadStream(input_stream, input_chunk.data(), chunk_size);
+
+                // Добавляем в буфер
+                {
+                    QMutexLocker locker(&buffer_lock);
+                    for (short sample : input_chunk) {
+                        audio_buffer.push_back(sample);
+                        if (audio_buffer.size() > buffer_size_in_chunks * chunk_size) {
+                            audio_buffer.pop_front();
+                        }
+                    }
+                }
+
+                // Накапливаем данные для распознавания
+                if (recognition_active && config.at("enable_censoring") == "true") {
+                    // Копируем в строку для распознавания
+                    const char* input_data = reinterpret_cast<const char*>(input_chunk.data());
+                    audio_data_for_recognition.append(input_data, chunk_size * sizeof(short));
+
+                    // Ограничиваем размер данных для распознавания
+                    size_t max_recognition_bytes = current_sample_rate * sizeof(short) * 2; // ~2 секунды аудио
+                    if (audio_data_for_recognition.size() > max_recognition_bytes) {
+                        audio_data_for_recognition = audio_data_for_recognition.substr(
+                            audio_data_for_recognition.size() - max_recognition_bytes
+                        );
+                    }
+
+                    // Отправляем на распознавание речи
+                    if (vosk_recognizer_accept_waveform(recognizer.get(),
+                                                      input_data,
+                                                      chunk_size * sizeof(short))) {
+                        const char* result_json = vosk_recognizer_result(recognizer.get());
+                        process_recognition_result(result_json);
+                    }
+                }
+
+                // Воспроизведение с задержкой
+                std::fill(output_chunk.begin(), output_chunk.end(), 0); // Заполняем нулями
+
+                // Извлекаем чанк из буфера
+                size_t samples_available;
+                {
+                    QMutexLocker locker(&buffer_lock);
+                    samples_available = audio_buffer.size();
+
+                    if (samples_available >= chunk_size) {
+                        for (int i = 0; i < chunk_size; i++) {
+                            if (!audio_buffer.empty()) {
+                                output_chunk[i] = audio_buffer.front();
+                                audio_buffer.pop_front();
+                            }
+                        }
+                    } else {
+                        // Если недостаточно данных, продолжаем цикл
+                        continue;
+                    }
+                }
+
+                // Проверяем, нужно ли цензурировать этот чанк
+                if (config.at("enable_censoring") == "true") {
+                    QMutexLocker locker(&regions_lock);
+                    for (size_t i = 0; i < censored_regions.size(); i++) {
+                        auto& region = censored_regions[i];
+                        int start_idx = std::get<0>(region);
+                        int end_idx = std::get<1>(region);
+                        bool processed = std::get<2>(region);
+
+                        if (start_idx <= chunks_processed && chunks_processed <= end_idx) {
+                            // Применяем цензуру - заменяем чанк на тишину или бип
+                            std::fill(output_chunk.begin(), output_chunk.end(), 0);
+                            emit censorApplied(chunks_processed, start_idx, end_idx);
+
+                            // Если достигли конца интервала, отмечаем его как обработанный
+                            if (chunks_processed == end_idx) {
+                                std::get<2>(region) = true;
+                            }
+                        }
+                    }
+
+                    // Удаляем обработанные интервалы
+                    censored_regions.erase(
+                        std::remove_if(censored_regions.begin(), censored_regions.end(),
+                                      [](const auto& r) { return std::get<2>(r); }),
+                        censored_regions.end()
+                    );
+                }
+
+                // Отправляем на выход
+                Pa_WriteStream(output_stream, output_chunk.data(), chunk_size);
+
+                // Увеличиваем счетчик обработанных чанков
+                chunks_processed++;
+
+                // Обновляем информацию о буфере в UI
+                emit bufferUpdate(static_cast<int>(audio_buffer.size()),
+                                buffer_size_in_chunks * chunk_size);
+
+            } catch (const std::exception& e) {
+                emit logMessage(QString("❌ Ошибка при обработке аудио: %1").arg(e.what()));
+            }
+        }
+
+        // Небольшая пауза для экономии CPU
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Очистка ресурсов
+    cleanup_resources();
+    emit logMessage("✅ Обработка аудио завершена");
+}
+
+void AudioProcessor::process_recognition_result(const std::string& result_json) {
+    try {
+        // Парсим JSON
+        json result = json::parse(result_json);
+
+        // Проверяем наличие результатов
+        if (!result.contains("result") || !result["result"].is_array()) {
+            return;
+        }
+
+        auto words = result["result"];
+        if (words.empty()) {
+            return;
+        }
+
+        // Выводим все распознанные слова для отладки, если включено
+        if (config.at("debug_mode") == "true") {
+            QStringList all_words;
+            for (const auto& word : words) {
+                all_words.append(QString::fromStdString(word["word"].get<std::string>()).toLower());
+            }
+            emit logMessage(QString("🔍 Распознано: %1").arg(all_words.join(", ")));
+        }
+
+        // Текущее время от начала программы
+        double elapsed_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count() / 1000.0 - program_start_time;
+
+        // Создаем детектор слов
+        WordDetector detector(std::unordered_map<std::string, std::string>());
+
+        // Подготавливаем списки целевых слов и паттернов
+        std::vector<std::string> target_patterns;
+        std::vector<std::string> target_words;
+
+        // Разбор строки с паттернами
+        if (config.find("target_patterns") != config.end()) {
+            try {
+                // Предполагаем, что это JSON-строка с массивом
+                target_patterns = json::parse(config.at("target_patterns")).get<std::vector<std::string>>();
+            } catch (...) {
+                // Если не удалось разобрать как JSON, пробуем как обычную строку с разделителями
+                std::istringstream iss(config.at("target_patterns"));
+                std::string pattern;
+                while (std::getline(iss, pattern, ',')) {
+                    if (!pattern.empty()) {
+                        target_patterns.push_back(pattern);
+                    }
+                }
+            }
+        }
+
+        // Разбор строки с целевыми словами
+        if (config.find("target_words") != config.end()) {
+            try {
+                // Предполагаем, что это JSON-строка с массивом
+                target_words = json::parse(config.at("target_words")).get<std::vector<std::string>>();
+            } catch (...) {
+                // Если не удалось разобрать как JSON, пробуем как обычную строку с разделителями
+                std::istringstream iss(config.at("target_words"));
+                std::string word;
+                while (std::getline(iss, word, ',')) {
+                    if (!word.empty()) {
+                        target_words.push_back(word);
+                    }
+                }
+            }
+        }
+
+        // Параметры для вычисления индексов чанков
+        int chunk_size = std::stoi(config.at("chunk_size"));
+        double buffer_delay = std::stod(config.at("buffer_delay"));
+        int safety_margin = std::stoi(config.at("safety_margin"));
+        double chunks_per_second = static_cast<double>(current_sample_rate) / chunk_size;
+
+        for (const auto& word : words) {
+            std::string word_text = word["word"].get<std::string>();
+            std::transform(word_text.begin(), word_text.end(), word_text.begin(),
+                         [](unsigned char c){ return std::tolower(c); });
+
+            // Проверяем, является ли слово запрещенным
+            bool is_prohibited;
+            std::string matched_pattern;
+            std::tie(is_prohibited, matched_pattern) = detector.is_prohibited_word(word_text,
+                                                                               target_patterns,
+                                                                               target_words);
+
+            if (is_prohibited) {
+                // Получаем время начала и конца слова
+                double start_time = word["start"].get<double>();
+                double end_time = word["end"].get<double>();
+
+                // Рассчитываем индексы чанков для цензуры с учетом текущей частоты дискретизации
+                int chunks_offset_start = static_cast<int>((start_time - (elapsed_time - buffer_delay)) *
+                                                      chunks_per_second) - safety_margin;
+                int chunks_offset_end = static_cast<int>((end_time - (elapsed_time - buffer_delay)) *
+                                                    chunks_per_second) + safety_margin;
+
+                // Абсолютные индексы чанков для цензуры
+                int censored_chunk_start = chunks_processed + chunks_offset_start;
+                int censored_chunk_end = chunks_processed + chunks_offset_end;
+
+                // Добавляем регион для цензуры
+                {
+                    QMutexLocker locker(&regions_lock);
+                    censored_regions.push_back(std::make_tuple(censored_chunk_start, censored_chunk_end, false));
+                }
+
+                // Уведомляем о найденном слове
+                emit wordDetected(QString::fromStdString(word_text), start_time, end_time);
+
+                // Улучшенное форматирование сообщения
+                QString log_message = QString("⚠️ Обнаружено ненормативная лексика: \"%1\"\n")
+                                    .arg(QString::fromStdString(word_text));
+
+                log_message += QString("   Время: %1с - %2с (длительность: %3с)\n")
+                            .arg(start_time, 0, 'f', 2)
+                            .arg(end_time, 0, 'f', 2)
+                            .arg(end_time - start_time, 0, 'f', 2);
+
+                emit logMessage(log_message);
+
+                // Сохраняем в файл, если включено
+                if (config.at("log_to_file") == "true") {
+                    try {
+                        std::ofstream log_file(config.at("log_file"), std::ios::app);
+                        if (log_file.is_open()) {
+                            auto now = std::chrono::system_clock::now();
+                            auto now_time_t = std::chrono::system_clock::to_time_t(now);
+                            std::tm now_tm = *std::localtime(&now_time_t);
+
+                            char timestamp[20];
+                            std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &now_tm);
+
+                            log_file << timestamp << " - Обнаружено: \"" << word_text << "\" "
+                                    << (matched_pattern.empty() ? "" : "(шаблон: " + matched_pattern + ") ")
+                                    << "(время: " << start_time << "с-" << end_time << "с)" << std::endl;
+
+                            log_file.close();
+                        }
+                    } catch (const std::exception& e) {
+                        emit logMessage(QString("❌ Ошибка записи в лог-файл: %1").arg(e.what()));
+                    }
+                }
+            }
+        }
+
+    } catch (const json::parse_error& e) {
+        emit logMessage(QString("❌ Ошибка при разборе JSON результатов распознавания: %1").arg(e.what()));
+    } catch (const std::exception& e) {
+        emit logMessage(QString("❌ Ошибка при обработке результатов распознавания: %1").arg(e.what()));
+    }
+}
+
+void AudioProcessor::update_config(const std::unordered_map<std::string, std::string>& new_config) {
+    config = new_config;
+
+    // Пересчитываем размер буфера
+    buffer_size_in_chunks = static_cast<int>(std::stod(config.at("buffer_delay")) * current_sample_rate /
+                                          std::stoi(config.at("chunk_size"))) + 2;
+
+    // Очищаем кэш бипов при изменении частоты или громкости
+    beep_cache.clear();
+}
+
+void AudioProcessor::pause() {
+    paused = true;
+}
+
+void AudioProcessor::resume() {
+    paused = false;
+}
+
+void AudioProcessor::stop_processing() {
+    running = false;
+
+    // Ждем завершения потока
+    wait(1000); // Ждем максимум 1 секунду
+
+    // Освобождаем ресурсы
+    cleanup_resources();
+}
+
+void AudioProcessor::cleanup_resources() {
+    // Правильное освобождение ресурсов
+    try {
+        if (input_stream) {
+            Pa_StopStream(input_stream);
+            Pa_CloseStream(input_stream);
+            input_stream = nullptr;
+        }
+    } catch (const std::exception& e) {
+        emit logMessage(QString("Ошибка при закрытии потока ввода: %1").arg(e.what()));
+    }
+
+    try {
+        if (output_stream) {
+            Pa_StopStream(output_stream);
+            Pa_CloseStream(output_stream);
+            output_stream = nullptr;
+        }
+    } catch (const std::exception& e) {
+        emit logMessage(QString("Ошибка при закрытии потока вывода: %1").arg(e.what()));
+    }
+
+    try {
+        Pa_Terminate();
+    } catch (const std::exception& e) {
+        emit logMessage(QString("Ошибка при завершении PortAudio: %1").arg(e.what()));
+    }
+
+    // Очищаем буферы
+    {
+        QMutexLocker locker(&buffer_lock);
+        audio_buffer.clear();
+    }
+
+    {
+        QMutexLocker locker(&regions_lock);
+        censored_regions.clear();
+    }
+
+    // Очищаем кэш бипов
+    beep_cache.clear();
+
+    // Освобождаем распознаватель и модель
+    recognizer.reset();
+    model.reset();
+
+    emit logMessage("✅ Ресурсы аудио освобождены");
+}
+
+} // namespace audiocensor

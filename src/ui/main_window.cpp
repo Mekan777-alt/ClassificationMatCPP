@@ -20,6 +20,8 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QTimer>
+#include <QScrollBar> // Добавлено для QScrollBar
+#include <QCloseEvent> // Добавлено для QCloseEvent
 
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
@@ -75,7 +77,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Таймер обновления статуса
     status_timer = new QTimer(this);
-    status_timer->timeout.connect([this]() { update_status(); });
+    connect(status_timer, &QTimer::timeout, this, &MainWindow::update_status);
     status_timer->start(1000); // обновление каждую секунду
 
     // Показываем информацию о лицензии
@@ -258,8 +260,7 @@ void MainWindow::add_log_message(const QString& message) {
     log_text->append(QString("[%1] %2").arg(timestamp).arg(message));
 
     // Прокрутка до конца
-    QScrollBar* scrollbar = log_text->verticalScrollBar();
-    scrollbar->setValue(scrollbar->maximum());
+    log_text->verticalScrollBar()->setValue(log_text->verticalScrollBar()->maximum());
 }
 
 void MainWindow::clear_log() {
@@ -691,8 +692,7 @@ bool MainWindow::check_license_on_launch() {
 
     return true;
 }
-
-void MainWindow::closeEvent(QEvent* event) {
+void MainWindow::closeEvent(QCloseEvent* event) {
     if (running) {
         // Останавливаем обработку при закрытии
         audio_processor->stop_processing();
