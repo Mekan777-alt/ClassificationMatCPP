@@ -12,9 +12,9 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 # Директории с исходными файлами
-set(SOURCE_DIR ../src)
-set(INCLUDE_DIR ../include)
-set(RESOURCES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/resources)
+set(SOURCE_DIR src)
+set(INCLUDE_DIR include)
+set(RESOURCES_DIR tools/resources)
 
 # Поиск необходимых пакетов
 find_package(Qt6 COMPONENTS Core Widgets REQUIRED)
@@ -48,7 +48,7 @@ set(APP_SOURCES
         ${SOURCE_DIR}/main.cpp
         ${CORE_SOURCES}
         ${UI_SOURCES}
-        ../include/audiocensor/audio_processor.h
+        include/audiocensor/audio_processor.h
 )
 
 # Включение директорий заголовочных файлов
