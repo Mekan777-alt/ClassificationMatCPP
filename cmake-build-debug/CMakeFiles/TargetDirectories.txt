@@ -1,0 +1,3 @@
+/Users/mekanmededov/CLionProjects/ClassificationMat/cmake-build-debug/CMakeFiles/ClassificationMat.dir
+/Users/mekanmededov/CLionProjects/ClassificationMat/cmake-build-debug/CMakeFiles/edit_cache.dir
+/Users/mekanmededov/CLionProjects/ClassificationMat/cmake-build-debug/CMakeFiles/rebuild_cache.dir
